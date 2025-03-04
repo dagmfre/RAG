@@ -24,6 +24,7 @@ import {
   SystemMessage,
   ToolMessage,
 } from "@langchain/core/messages";
+import { v4 as uuidv4 } from "uuid";
 
 // Load and chunk contents of blog
 const webLoader = new PuppeteerWebBaseLoader(
@@ -134,14 +135,14 @@ async function generate(state: typeof MessagesAnnotation.State) {
   let toolMessages: ToolMessage[] = recentToolMessages.reverse();
 
   const docsContent = toolMessages.map((doc) => doc.content).join("\n");
-  // console.log(docsContent);
 
   // creating systemMessage from the retrieved docs
   const systemMessageContent =
-    "You are an assistant for question-answering tasks about React Query. " +
+    "You are an assistant for question-answering tasks. " +
     "Use the following pieces of retrieved context to answer " +
-    "the question. Pay special attention to code examples and implementation details. " +
-    "If you don't know the answer, say that you don't know." +
+    "the question. If you don't know the answer, say that you " +
+    "don't know. Use three sentences maximum and keep the " +
+    "answer concise." +
     "\n\n" +
     `${docsContent}`;
 
@@ -177,58 +178,76 @@ const graphBuilder = new StateGraph(MessagesAnnotation)
   .addEdge("tools", "generate")
   .addEdge("generate", "__end__");
 
-const checkPointer = new MemorySaver();
-const graphWithMemory = graphBuilder.compile({ checkpointer: checkPointer });
+/////////////////////////////////////////////////////////////////////////////////////////////
+// Add checkpointer using MemorySaver for chat history persistence
+const checkpointer = new MemorySaver();
+const graphWithMemory = graphBuilder.compile({ checkpointer });
 
+// Helper function to print messages nicely
 const prettyPrint = (message: BaseMessage) => {
-  let txt = `[${message._getType()}]: ${message.content}`;
-  if ((isAIMessage(message) && message.tool_calls?.length) || 0 > 0) {
-    const tool_calls = (message as AIMessage)?.tool_calls
-      ?.map((tc) => `- ${tc.name}(${JSON.stringify(tc.args)})`)
-      .join("\n");
-    txt += ` \nTools: \n${tool_calls}`;
+  if (message instanceof HumanMessage) {
+    console.log(`[human]: ${message.content}`);
+  } else if (message instanceof AIMessage) {
+    if (message.tool_calls?.length) {
+      console.log(`[ai]:\nTools:`);
+      for (const tool_call of message.tool_calls) {
+        console.log(`- ${tool_call.name}(${JSON.stringify(tool_call.args)})`);
+      }
+    } else {
+      console.log(`[ai]: ${message.content}`);
+    }
+  } else if (message instanceof ToolMessage) {
+    console.log(`[tool]: ${message.content}`);
   }
-  console.log(txt);
 };
 
-let inputs1 = {
-  messages: [
-    {
-      role: "user",
-      content:
-        "What are the Key Features of React Query listed in the blog website?",
-    },
-  ],
-};
+// Demo function to show persistence across multiple queries with the same thread ID
+async function demonstrateMemoryPersistence() {
+  // Create a thread ID
+  const threadId = "demo-thread-";
 
-// Specify an ID for the thread
-const threadConfig = {
-  configurable: { thread_id: "reactQuery123" },
-  streamMode: "values" as const,
-};
+  // Configuration for streaming with thread ID
+  const threadConfig = {
+    configurable: { thread_id: threadId },
+    streamMode: "values" as const,
+  };
 
-// for await (const step of await graphWithMemory.stream(inputs1, threadConfig)) {
-//   const lastMessage = step.messages[step.messages.length - 1];
-//   prettyPrint(lastMessage);
-//   console.log("-----\n");
-// }
+  // First query
+  console.log("FIRST QUERY:");
+  const query1 = {
+    messages: [
+      {
+        role: "user",
+        content: "What is Polling?",
+      },
+    ],
+  };
 
-let inputs3 = {
-  messages: [{ role: "user", content: "can you list some ways of implementing it?" }],
-};
-
-for await (const step of await graphWithMemory.stream(inputs3, threadConfig)) {
-  const lastMessage = step.messages[step.messages.length - 1];
-  prettyPrint(lastMessage);
   console.log("-----\n");
+
+  // Stream the response for the first query
+  for await (const step of await graphWithMemory.stream(query1, threadConfig)) {
+    const lastMessage = step.messages[step.messages.length - 1];
+    prettyPrint(lastMessage);
+  }
+
+  // Second query - demonstrating memory persistence
+  // console.log("\nSECOND QUERY (with memory of first conversation):");
+  // const query2 = {
+  //   messages: [
+  //     {
+  //       role: "user",
+  //       content: "What is my name?",
+  //     },
+  //   ],
+  // };
+
+  // Stream the response for the second query
+  // for await (const step of await graphWithMemory.stream(query2, threadConfig)) {
+  //   const lastMessage = step.messages[step.messages.length - 1];
+  //   prettyPrint(lastMessage);
+  //   console.log("-----\n");
+  // }
 }
 
-// // Cell 3: Generate and display the graph
-// const image = await graph.getGraph().drawMermaidPng();
-// const arrayBuffer = await image.arrayBuffer();
-
-// // Display the image
-// if (typeof Uint8Array === "undefined") {
-//   global.Uint8Array = require("util").types.Uint8Array;
-// }
-// await tslab.display.png(new Uint8Array(arrayBuffer));
+demonstrateMemoryPersistence();
