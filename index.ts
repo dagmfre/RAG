@@ -1,4 +1,10 @@
 import "puppeteer";
+import { HuggingFaceInferenceEmbeddings } from "@langchain/community/embeddings/hf";
+import {
+  ChatGoogleGenerativeAI,
+  GoogleGenerativeAIChatInput,
+} from "@langchain/google-genai";
+import { GoogleGenerativeAI } from "@google/generative-ai";
 import { PuppeteerWebBaseLoader } from "@langchain/community/document_loaders/web/puppeteer";
 import {
   MemorySaver,
@@ -12,7 +18,6 @@ import { z } from "zod";
 import { tool } from "@langchain/core/tools";
 dotenv.config();
 
-import { ChatGoogleGenerativeAI } from "@langchain/google-genai";
 import { MemoryVectorStore } from "langchain/vectorstores/memory";
 import { GoogleGenerativeAIEmbeddings } from "@langchain/google-genai";
 import { TaskType } from "@google/generative-ai";
@@ -24,7 +29,7 @@ import {
   SystemMessage,
   ToolMessage,
 } from "@langchain/core/messages";
-import { v4 as uuidv4 } from "uuid";
+import { CallbackManagerForLLMRun } from "@langchain/core/callbacks/manager";
 
 // Load and chunk contents of blog
 const webLoader = new PuppeteerWebBaseLoader(
@@ -55,18 +60,73 @@ const splitter = new RecursiveCharacterTextSplitter({
 });
 const allSplits = await splitter.splitDocuments(docs);
 
-// Initialize LLM and embeddings
-const llm = new ChatGoogleGenerativeAI({
+// Custom class for Gemini 2.0 Flash
+class ChatGemini2Flash extends ChatGoogleGenerativeAI {
+  genAIClient: GoogleGenerativeAI;
+
+  constructor(config: GoogleGenerativeAIChatInput | undefined) {
+    super(config);
+    if (!config?.apiKey) {
+      throw new Error("API key is required for GoogleGenerativeAI");
+    }
+    this.genAIClient = new GoogleGenerativeAI(config.apiKey);
+    this.modelName = "gemini-2.0-flash";
+  }
+
+  async _generate(
+    messages: BaseMessage[],
+    options: this["ParsedCallOptions"],
+    runManager?: CallbackManagerForLLMRun
+  ) {
+    const model = this.genAIClient.getGenerativeModel({
+      model: this.modelName,
+    });
+
+    const formattedMessages = this._convertToGoogleFormat(messages);
+
+    const result = await model.generateContent(formattedMessages);
+    const responseText = result.response.text();
+
+    return {
+      generations: [
+        {
+          text: responseText,
+          message: new AIMessage(responseText),
+        },
+      ],
+    };
+  }
+
+  _convertToGoogleFormat(messages: BaseMessage[]): any {
+    const contents = messages.map(message => {
+      // Determine the role based on message type
+      let role = 'user';
+      if (message instanceof AIMessage) {
+        role = 'model';
+      } else if (message instanceof SystemMessage) {
+        role = 'system';
+      }
+
+      // Create a parts array with a text entry
+      return {
+        role: role,
+        parts: [{ text: message.content.toString() }]
+      };
+    });
+
+    return { contents };
+  }
+}
+
+const llm = new ChatGemini2Flash({
   apiKey: process.env.GOOGLE_API_KEY,
-  model: "gemini-1.5-pro",
   temperature: 0,
   maxOutputTokens: 1000,
 });
 
-const embeddings = new GoogleGenerativeAIEmbeddings({
-  apiKey: process.env.GOOGLE_API_KEY,
-  model: "text-embedding-004", // 768 dimensions
-  taskType: TaskType.RETRIEVAL_DOCUMENT,
+const embeddings = new HuggingFaceInferenceEmbeddings({
+  apiKey: process.env.HUGGINGFACEHUB_API_KEY,
+  model: "BAAI/bge-m3",
 });
 
 const vectorStore = await MemoryVectorStore.fromDocuments(
@@ -218,7 +278,7 @@ async function demonstrateMemoryPersistence() {
     messages: [
       {
         role: "user",
-        content: "What is Polling?",
+        content: "What is Polling in the document?",
       },
     ],
   };
