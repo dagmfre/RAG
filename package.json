@@ -20,6 +20,7 @@
     "@langchain/langgraph": "^0.2.50",
     "@langchain/openai": "^0.4.4",
     "@langchain/textsplitters": "^0.1.0",
+    "axios": "^1.8.1",
     "cheerio": "^1.0.0",
     "dotenv": "^16.4.7",
     "langchain": "^0.3.19",

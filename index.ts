@@ -1,10 +1,6 @@
+import { HuggingFaceInference } from "@langchain/community/llms/hf";
 import "puppeteer";
 import { HuggingFaceInferenceEmbeddings } from "@langchain/community/embeddings/hf";
-import {
-  ChatGoogleGenerativeAI,
-  GoogleGenerativeAIChatInput,
-} from "@langchain/google-genai";
-import { GoogleGenerativeAI } from "@google/generative-ai";
 import { PuppeteerWebBaseLoader } from "@langchain/community/document_loaders/web/puppeteer";
 import {
   MemorySaver,
@@ -29,7 +25,7 @@ import {
   SystemMessage,
   ToolMessage,
 } from "@langchain/core/messages";
-import { CallbackManagerForLLMRun } from "@langchain/core/callbacks/manager";
+import { v4 as uuidv4 } from "uuid";
 
 // Load and chunk contents of blog
 const webLoader = new PuppeteerWebBaseLoader(
@@ -60,68 +56,9 @@ const splitter = new RecursiveCharacterTextSplitter({
 });
 const allSplits = await splitter.splitDocuments(docs);
 
-// Custom class for Gemini 2.0 Flash
-class ChatGemini2Flash extends ChatGoogleGenerativeAI {
-  genAIClient: GoogleGenerativeAI;
-
-  constructor(config: GoogleGenerativeAIChatInput | undefined) {
-    super(config);
-    if (!config?.apiKey) {
-      throw new Error("API key is required for GoogleGenerativeAI");
-    }
-    this.genAIClient = new GoogleGenerativeAI(config.apiKey);
-    this.modelName = "gemini-2.0-flash";
-  }
-
-  async _generate(
-    messages: BaseMessage[],
-    options: this["ParsedCallOptions"],
-    runManager?: CallbackManagerForLLMRun
-  ) {
-    const model = this.genAIClient.getGenerativeModel({
-      model: this.modelName,
-    });
-
-    const formattedMessages = this._convertToGoogleFormat(messages);
-
-    const result = await model.generateContent(formattedMessages);
-    const responseText = result.response.text();
-
-    return {
-      generations: [
-        {
-          text: responseText,
-          message: new AIMessage(responseText),
-        },
-      ],
-    };
-  }
-
-  _convertToGoogleFormat(messages: BaseMessage[]): any {
-    const contents = messages.map(message => {
-      // Determine the role based on message type
-      let role = 'user';
-      if (message instanceof AIMessage) {
-        role = 'model';
-      } else if (message instanceof SystemMessage) {
-        role = 'system';
-      }
-
-      // Create a parts array with a text entry
-      return {
-        role: role,
-        parts: [{ text: message.content.toString() }]
-      };
-    });
-
-    return { contents };
-  }
-}
-
-const llm = new ChatGemini2Flash({
-  apiKey: process.env.GOOGLE_API_KEY,
-  temperature: 0,
-  maxOutputTokens: 1000,
+const llm = new HuggingFaceInference({
+  model: "meta-llama/Llama-3.2-3B-Instruct", // or other Llama models
+  apiKey: process.env.HUGGINGFACEHUB_API_KEY,
 });
 
 const embeddings = new HuggingFaceInferenceEmbeddings({
@@ -163,8 +100,8 @@ const retrieve = tool(
 // A tool to make LLM include a tool-call(if retrieval is necessary) or directly respond
 // then return/add to the message state: AIMessage
 const retrieveOrRespond = async (state: typeof MessagesAnnotation.State) => {
-  const llmWithTool = llm.bindTools([retrieve]);
-  const response = await llmWithTool.invoke(state.messages);
+  // const llmWithTool = llm.bind([retrieve]);
+  const response = await llm.bindTools([retrieve]);
   return { messages: [response] };
 };
 
@@ -278,7 +215,7 @@ async function demonstrateMemoryPersistence() {
     messages: [
       {
         role: "user",
-        content: "What is Polling in the document?",
+        content: "What is the document about?",
       },
     ],
   };
