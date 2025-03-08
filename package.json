@@ -18,6 +18,7 @@
     "@langchain/core": "^0.3.41",
     "@langchain/google-genai": "^0.1.10",
     "@langchain/langgraph": "^0.2.50",
+    "@langchain/mistralai": "^0.2.0",
     "@langchain/openai": "^0.4.4",
     "@langchain/textsplitters": "^0.1.0",
     "axios": "^1.8.1",

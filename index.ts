@@ -1,4 +1,3 @@
-import { HuggingFaceInference } from "@langchain/community/llms/hf";
 import "puppeteer";
 import { HuggingFaceInferenceEmbeddings } from "@langchain/community/embeddings/hf";
 import { PuppeteerWebBaseLoader } from "@langchain/community/document_loaders/web/puppeteer";
@@ -13,10 +12,8 @@ import dotenv from "dotenv";
 import { z } from "zod";
 import { tool } from "@langchain/core/tools";
 dotenv.config();
-
+import { ChatMistralAI } from "@langchain/mistralai";
 import { MemoryVectorStore } from "langchain/vectorstores/memory";
-import { GoogleGenerativeAIEmbeddings } from "@langchain/google-genai";
-import { TaskType } from "@google/generative-ai";
 import {
   AIMessage,
   BaseMessage,
@@ -56,9 +53,10 @@ const splitter = new RecursiveCharacterTextSplitter({
 });
 const allSplits = await splitter.splitDocuments(docs);
 
-const llm = new HuggingFaceInference({
-  model: "meta-llama/Llama-3.2-3B-Instruct", // or other Llama models
-  apiKey: process.env.HUGGINGFACEHUB_API_KEY,
+const llm = new ChatMistralAI({
+  model: "mistral-small-latest", // or other Llama models
+  temperature: 0,
+  maxRetries: 2,
 });
 
 const embeddings = new HuggingFaceInferenceEmbeddings({
@@ -100,8 +98,16 @@ const retrieve = tool(
 // A tool to make LLM include a tool-call(if retrieval is necessary) or directly respond
 // then return/add to the message state: AIMessage
 const retrieveOrRespond = async (state: typeof MessagesAnnotation.State) => {
-  // const llmWithTool = llm.bind([retrieve]);
-  const response = await llm.bindTools([retrieve]);
+  const llmWithTools = llm.bindTools([retrieve]);
+
+  // Extract human messages from the state
+  const messages = state.messages.filter(
+    (message) =>
+      message instanceof HumanMessage || message instanceof SystemMessage
+  );
+
+  // Invoke the LLM with the messages from state
+  const response = await llmWithTools.invoke(messages);
   return { messages: [response] };
 };
 
@@ -182,26 +188,20 @@ const graphWithMemory = graphBuilder.compile({ checkpointer });
 
 // Helper function to print messages nicely
 const prettyPrint = (message: BaseMessage) => {
-  if (message instanceof HumanMessage) {
-    console.log(`[human]: ${message.content}`);
-  } else if (message instanceof AIMessage) {
-    if (message.tool_calls?.length) {
-      console.log(`[ai]:\nTools:`);
-      for (const tool_call of message.tool_calls) {
-        console.log(`- ${tool_call.name}(${JSON.stringify(tool_call.args)})`);
-      }
-    } else {
-      console.log(`[ai]: ${message.content}`);
-    }
-  } else if (message instanceof ToolMessage) {
-    console.log(`[tool]: ${message.content}`);
+  let txt = `[${message._getType()}]: ${message.content}`;
+  if ((isAIMessage(message) && message.tool_calls?.length) || 0 > 0) {
+    const tool_calls = (message as AIMessage)?.tool_calls
+      ?.map((tc) => `- ${tc.name}(${JSON.stringify(tc.args)})`)
+      .join("\n");
+    txt += ` \nTools: \n${tool_calls}`;
   }
+  console.log(txt);
 };
 
 // Demo function to show persistence across multiple queries with the same thread ID
 async function demonstrateMemoryPersistence() {
   // Create a thread ID
-  const threadId = "demo-thread-";
+  const threadId = "demo-thread-id";
 
   // Configuration for streaming with thread ID
   const threadConfig = {
@@ -209,13 +209,13 @@ async function demonstrateMemoryPersistence() {
     streamMode: "values" as const,
   };
 
-  // First query
+  // // First query
   console.log("FIRST QUERY:");
   const query1 = {
     messages: [
       {
         role: "user",
-        content: "What is the document about?",
+        content: "My name is dagm",
       },
     ],
   };
@@ -239,7 +239,7 @@ async function demonstrateMemoryPersistence() {
   //   ],
   // };
 
-  // Stream the response for the second query
+  // // Stream the response for the second query
   // for await (const step of await graphWithMemory.stream(query2, threadConfig)) {
   //   const lastMessage = step.messages[step.messages.length - 1];
   //   prettyPrint(lastMessage);
