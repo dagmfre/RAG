@@ -3,7 +3,7 @@ import { HuggingFaceInferenceEmbeddings } from "@langchain/community/embeddings/
 import { PuppeteerWebBaseLoader } from "@langchain/community/document_loaders/web/puppeteer";
 import { PineconeStore } from "@langchain/pinecone";
 import { Pinecone as PineconeClient } from "@pinecone-database/pinecone";
-import { PromptTemplate } from "@langchain/core/prompts";
+import { ChatPromptTemplate, PromptTemplate } from "@langchain/core/prompts";
 import { RecursiveCharacterTextSplitter } from "@langchain/textsplitters";
 import dotenv from "dotenv";
 import { z } from "zod";
@@ -110,120 +110,6 @@ const retrieve = tool(
   }
 );
 
-// New tool: Document Relevancy Checker
-const checkDocRelevancySchema = z.object({
-  query: z.string(),
-  document: z.string(),
-});
-
-const checkDocRelevancy = tool(
-  async ({ query, document }) => {
-    const systemMessage =
-      "You are a grader assessing relevance of a retrieved document to a user question. " +
-      "If the document contains keyword(s) or semantic meaning related to the user question, grade it as relevant. " +
-      "It does not need to be a stringent test. The goal is to filter out erroneous retrievals. " +
-      "Give a binary score 'yes' or 'no' score to indicate whether the document is relevant to the question.";
-
-    const messages = [
-      new SystemMessage(systemMessage),
-      new HumanMessage(
-        `Retrieved document: \n\n ${document} \n\n User question: ${query}`
-      ),
-    ];
-
-    const response = await llm.invoke(messages);
-
-    const isRelevant =
-      typeof response.content === "string" &&
-      response.content.toLowerCase().includes("yes");
-
-    return isRelevant ? "yes" : "no";
-  },
-  {
-    name: "checkDocRelevancy",
-    description: "Check if a document is relevant to a query.",
-    schema: checkDocRelevancySchema,
-  }
-);
-
-// New tool: Hallucination Checker
-const checkHallucinationSchema = z.object({
-  documents: z.string(),
-  generation: z.string(),
-});
-
-const checkHallucination = tool(
-  async ({ documents, generation }) => {
-    const systemMessage =
-      "You are a grader assessing whether an LLM generation is grounded in / supported by a set of retrieved facts. " +
-      "Give a binary score 'yes' or 'no'. 'Yes' means that the answer is grounded in / supported by the set of facts.";
-
-    const messages = [
-      new SystemMessage(systemMessage),
-      new HumanMessage(
-        `Set of facts: \n\n ${documents} \n\n LLM generation: ${generation}`
-      ),
-    ];
-
-    const response = await llm.invoke(messages);
-
-    // Parse the response to get yes/no
-    const isGrounded =
-      typeof response.content === "string" &&
-      response.content.toLowerCase().includes("yes");
-
-    return isGrounded ? "yes" : "no";
-  },
-  {
-    name: "checkHallucination",
-    description:
-      "Check if a generated response is grounded in the retrieved documents.",
-    schema: checkHallucinationSchema,
-  }
-);
-
-// New tool: Document Highlighter
-const highlightDocsSchema = z.object({
-  documents: z.string(),
-  question: z.string(),
-  generation: z.string(),
-});
-
-const highlightDocs = tool(
-  async ({ documents, question, generation }) => {
-    const systemMessage =
-      "You are an advanced assistant for document search and retrieval. You are provided with:\n" +
-      "1. A question.\n" +
-      "2. A generated answer based on the question.\n" +
-      "3. A set of documents that were referenced in generating the answer.\n\n" +
-      "Your task is to identify and extract the exact inline segments from the provided documents " +
-      "that directly correspond to the content used to generate the given answer. The extracted " +
-      "segments must be verbatim snippets from the documents, ensuring a word-for-word match with " +
-      "the text in the provided documents.\n\n" +
-      "Format your response as a JSON array with objects containing 'source' and 'segment' fields.";
-
-    const messages = [
-      new SystemMessage(systemMessage),
-      new HumanMessage(
-        `Documents: \n\n${documents}\n\n` +
-          `Question: ${question}\n\n` +
-          `Generated answer: ${generation}`
-      ),
-    ];
-
-    const response = await llm.invoke(messages);
-    return response.content;
-  },
-  {
-    name: "highlightDocs",
-    description:
-      "Highlight segments from the documents that were used in the generated response.",
-    schema: highlightDocsSchema,
-  }
-);
-
-// A tool to make LLM include a tool-call(if retrieval is necessary) or directly respond
-// then return/add to the message state: AIMessage
 const retrieveOrRespond = async (state: typeof MessagesAnnotation.State) => {
   const llmWithTools = llm.bindTools([retrieve]);
 
@@ -238,87 +124,111 @@ const retrieveOrRespond = async (state: typeof MessagesAnnotation.State) => {
   return { messages: [response] };
 };
 
-// A prebuilt langgragh node that runs created tools, here only the retrieval node
-const tools = new ToolNode([
-  retrieve,
-  checkDocRelevancy,
-  checkHallucination,
-  highlightDocs,
-]);
+const checkDocRelevancy = async (
+  state: typeof MessagesAnnotation.State
+): Promise<Partial<typeof MessagesAnnotation.State>> => {
+  console.log("---GET RELEVANCE---");
 
-// Filter out irrelevant documents
-const filterDocsNode = async (state: typeof MessagesAnnotation.State) => {
-  // Get the last human message for the query
-  const humanMessages = state.messages.filter(
-    (message) => message instanceof HumanMessage
+  const { messages } = state;
+
+  const tool = {
+    name: "give_relevance_score",
+    description: "Give a relevance score to the retrieved documents.",
+    schema: z.object({
+      binaryScore: z.string().describe("Relevance score 'yes' or 'no'"),
+    }),
+  };
+
+  const prompt = ChatPromptTemplate.fromTemplate(
+    `You are a grader assessing relevance of retrieved docs to a user question.
+  Here are the retrieved docs:
+  \n ------- \n
+  {context} 
+  \n ------- \n
+  Here is the user question: {question}
+  If the document contains keyword(s) or semantic meaning related to the user question, grade it as relevant. 
+  It does not need to be a stringent test. The goal is to filter out erroneous retrievals. 
+  Give a binary score 'yes' or 'no' score to indicate whether the docs are relevant to the question.
+  Yes: The docs are relevant to the question.
+  No: The docs are not relevant to the question.`
   );
-  const lastHumanMessage = humanMessages[humanMessages.length - 1];
-  const query = lastHumanMessage.content as string;
 
-  // Get tool messages with retrieved docs
-  let retrievedDocsToolMessage: ToolMessage | null = null;
-  for (let i = state.messages.length - 1; i >= 0; i--) {
-    if (
-      state.messages[i] instanceof ToolMessage &&
-      state.messages[i].name === "retrieve"
-    ) {
-      retrievedDocsToolMessage = state.messages[i] as ToolMessage;
-      break;
-    }
-  }
+  const llmWithTools = llm.bindTools([tool], {
+    tool_choice: { type: "function", function: { name: tool.name } },
+  });
 
-  if (!retrievedDocsToolMessage) {
-    return state;
-  }
+  const chain = prompt.pipe(llmWithTools);
 
-  // Extract the docs from the tool message
-  const retrievedDocs = retrievedDocsToolMessage.artifact;
+  const lastMessage = messages[messages.length - 1];
 
-  // Filter relevant documents
-  let relevantDocs = [];
-  for (const doc of retrievedDocs) {
-    const isRelevant = await llm.invoke([
-      new SystemMessage(
-        "You are a grader assessing relevance of a retrieved document to a user question. " +
-          "If the document contains keyword(s) or semantic meaning related to the user question, grade it as relevant. " +
-          "It does not need to be a stringent test. The goal is to filter out erroneous retrievals. " +
-          "Give a binary score 'yes' or 'no' score to indicate whether the document is relevant to the question."
-      ),
-      new HumanMessage(
-        `Retrieved document: \n\n ${doc.pageContent} \n\n User question: ${query}`
-      ),
-    ]);
+  console.log(messages);
 
-    if (
-      typeof isRelevant.content === "string" &&
-      isRelevant.content.toLowerCase().includes("yes")
-    ) {
-      relevantDocs.push(doc);
-    }
-  }
+  const score = await chain.invoke({
+    question: messages[0].content as string,
+    context: lastMessage.content as string,
+  });
 
-  // Create a new tool message with filtered docs
-  const serialized = relevantDocs
-    .map((doc) => `Source: ${doc.metadata.source}\nContent: ${doc.pageContent}`)
-    .join("\n");
-
-  const newToolMessage = new ToolMessage(serialized);
-  newToolMessage.name = "retrieve";
-  newToolMessage.tool_name = "retrieve";
-  newToolMessage.tool_call_id = retrievedDocsToolMessage.tool_call_id;
-  newToolMessage.artifact = relevantDocs;
-
-  // Replace the old tool message with the new one
-  const newMessages = [...state.messages];
-  for (let i = 0; i < newMessages.length; i++) {
-    if (newMessages[i] === retrievedDocsToolMessage) {
-      newMessages[i] = newToolMessage;
-      break;
-    }
-  }
-
-  return { messages: newMessages };
+  return {
+    messages: [score],
+  };
 };
+
+// New tool: Hallucination Checker
+const checkHallucinationSchema = z.object({
+  documents: z.string(),
+  generation: z.string(),
+});
+
+const checkHallucination = async (
+  state: typeof MessagesAnnotation.State
+): Promise<Partial<typeof MessagesAnnotation.State>> => {
+  console.log("---GET RELEVANCE---");
+
+  const { messages } = state;
+
+  const tool = {
+    name: "give_relevance_score",
+    description: "Give a relevance score to the retrieved documents.",
+    schema: z.object({
+      binaryScore: z.string().describe("Relevance score 'yes' or 'no'"),
+    }),
+  };
+
+  const prompt = ChatPromptTemplate.fromTemplate(
+    `You are a grader assessing whether an LLM generation is grounded in / supported by a set of retrieved facts.
+    Here are the set of retrieved facts:
+    \n ------- \n
+    {documents} 
+    \n ------- \n
+    Here is the LLM generation: {generation}
+    Give a binary score 'yes' or 'no'. 'Yes' means that the answer is grounded in / supported by the set of facts.`
+  );
+
+  const llmWithTools = llm.bindTools([tool], {
+    tool_choice: { type: "function", function: { name: tool.name } },
+  });
+
+  const chain = prompt.pipe(llmWithTools);
+
+  const lastMessage = messages[messages.length - 1];
+
+  console.log(messages);
+
+  const score = await chain.invoke({
+    generation: lastMessage.content as string,
+    documents: messages[0].content as string,
+  });
+
+  return {
+    messages: [score],
+  };
+};
+
+// A tool to make LLM include a tool-call(if retrieval is necessary) or directly respond
+// then return/add to the message state: AIMessage
+
+// A prebuilt langgragh node that runs created tools, here only the retrieval node
+const tools = new ToolNode([retrieve]);
 
 // Generate final response from the llm by:
 // - first getting the retrieved docs inside toolMessages: array of tool messages(ToolMessage[]).

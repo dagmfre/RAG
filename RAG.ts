@@ -1,18 +1,20 @@
-Retriever¶
-
+import { END } from "@langchain/langgraph";
+import { pull } from "langchain/hub";
+import { z } from "zod";
+import { ChatPromptTemplate } from "@langchain/core/prompts";
+import { AIMessage, BaseMessage } from "@langchain/core/messages";
 import { CheerioWebBaseLoader } from "@langchain/community/document_loaders/web/cheerio";
 import { RecursiveCharacterTextSplitter } from "@langchain/textsplitters";
 import { MemoryVectorStore } from "langchain/vectorstores/memory";
-import { OpenAIEmbeddings } from "@langchain/openai";
+import { Annotation } from "@langchain/langgraph";
+import { HuggingFaceInferenceEmbeddings } from "@langchain/community/embeddings/hf";
+import dotenv from "dotenv";
+dotenv.config();
 
-const urls = [
-  "https://lilianweng.github.io/posts/2023-06-23-agent/",
-  "https://lilianweng.github.io/posts/2023-03-15-prompt-engineering/",
-  "https://lilianweng.github.io/posts/2023-10-25-adv-attack-llm/",
-];
+const urls = ["https://docs.pinecone.io/guides/get-started/quickstart"];
 
 const docs = await Promise.all(
-  urls.map((url) => new CheerioWebBaseLoader(url).load()),
+  urls.map((url) => new CheerioWebBaseLoader(url).load())
 );
 const docsList = docs.flat();
 
@@ -22,68 +24,18 @@ const textSplitter = new RecursiveCharacterTextSplitter({
 });
 const docSplits = await textSplitter.splitDocuments(docsList);
 
+const embeddings = new HuggingFaceInferenceEmbeddings({
+  apiKey: process.env.HUGGINGFACEHUB_API_KEY,
+  model: "BAAI/bge-m3",
+});
+
 // Add to vectorDB
 const vectorStore = await MemoryVectorStore.fromDocuments(
   docSplits,
-  new OpenAIEmbeddings(),
+  embeddings
 );
 
 const retriever = vectorStore.asRetriever();
-Agent state¶
-We will define a graph.
-
-You may pass a custom state object to the graph, or use a simple list of messages.
-
-Our state will be a list of messages.
-
-Each node in our graph will append to it.
-
-
-import { Annotation } from "@langchain/langgraph";
-import { BaseMessage } from "@langchain/core/messages";
-
-const GraphState = Annotation.Root({
-  messages: Annotation<BaseMessage[]>({
-    reducer: (x, y) => x.concat(y),
-    default: () => [],
-  })
-})
-
-import { createRetrieverTool } from "langchain/tools/retriever";
-import { ToolNode } from "@langchain/langgraph/prebuilt";
-
-const tool = createRetrieverTool(
-  retriever,
-  {
-    name: "retrieve_blog_posts",
-    description:
-      "Search and return information about Lilian Weng blog posts on LLM agents, prompt engineering, and adversarial attacks on LLMs.",
-  },
-);
-const tools = [tool];
-
-const toolNode = new ToolNode<typeof GraphState.State>(tools);
-Nodes and Edges¶
-Each node will -
-
-1/ Either be a function or a runnable.
-
-2/ Modify the state.
-
-The edges choose which node to call next.
-
-We can lay out an agentic RAG graph like this:
-
-image-2.png
-
-Edges¶
-
-import { END } from "@langchain/langgraph";
-import { pull } from "langchain/hub";
-import { z } from "zod";
-import { ChatPromptTemplate } from "@langchain/core/prompts";
-import { ChatOpenAI } from "@langchain/openai";
-import { AIMessage, BaseMessage } from "@langchain/core/messages";
 
 /**
  * Decides whether the agent should retrieve more information or end the process.
@@ -97,13 +49,36 @@ function shouldRetrieve(state: typeof GraphState.State): string {
   console.log("---DECIDE TO RETRIEVE---");
   const lastMessage = messages[messages.length - 1];
 
-  if ("tool_calls" in lastMessage && Array.isArray(lastMessage.tool_calls) && lastMessage.tool_calls.length) {
+  if (
+    "tool_calls" in lastMessage &&
+    Array.isArray(lastMessage.tool_calls) &&
+    lastMessage.tool_calls.length
+  ) {
     console.log("---DECISION: RETRIEVE---");
     return "retrieve";
   }
   // If there are no tool calls then we finish.
   return END;
 }
+
+const GraphState = Annotation.Root({
+  messages: Annotation<BaseMessage[]>({
+    reducer: (x, y) => x.concat(y),
+    default: () => [],
+  }),
+});
+
+import { createRetrieverTool } from "langchain/tools/retriever";
+import { ToolNode } from "@langchain/langgraph/prebuilt";
+
+const tool = createRetrieverTool(retriever, {
+  name: "retrieve_blog_posts",
+  description:
+    "Search and return information about Lilian Weng blog posts on LLM agents, prompt engineering, and adversarial attacks on LLMs.",
+});
+const tools = [tool];
+
+const toolNode = new ToolNode<typeof GraphState.State>(tools);
 
 /**
  * Determines whether the Agent should continue based on the relevance of retrieved documents.
@@ -114,7 +89,9 @@ function shouldRetrieve(state: typeof GraphState.State): string {
  * @param {typeof GraphState.State} state - The current state of the agent, including all messages.
  * @returns {Promise<Partial<typeof GraphState.State>>} - The updated state with the new message added to the list of messages.
  */
-async function gradeDocuments(state: typeof GraphState.State): Promise<Partial<typeof GraphState.State>> {
+async function gradeDocuments(
+  state: typeof GraphState.State
+): Promise<Partial<typeof GraphState.State>> {
   console.log("---GET RELEVANCE---");
 
   const { messages } = state;
@@ -123,8 +100,8 @@ async function gradeDocuments(state: typeof GraphState.State): Promise<Partial<t
     description: "Give a relevance score to the retrieved documents.",
     schema: z.object({
       binaryScore: z.string().describe("Relevance score 'yes' or 'no'"),
-    })
-  }
+    }),
+  };
 
   const prompt = ChatPromptTemplate.fromTemplate(
     `You are a grader assessing relevance of retrieved docs to a user question.
@@ -133,17 +110,18 @@ async function gradeDocuments(state: typeof GraphState.State): Promise<Partial<t
   {context} 
   \n ------- \n
   Here is the user question: {question}
-  If the content of the docs are relevant to the users question, score them as relevant.
+  If the document contains keyword(s) or semantic meaning related to the user question, grade it as relevant. 
+  It does not need to be a stringent test. The goal is to filter out erroneous retrievals. 
   Give a binary score 'yes' or 'no' score to indicate whether the docs are relevant to the question.
   Yes: The docs are relevant to the question.
-  No: The docs are not relevant to the question.`,
+  No: The docs are not relevant to the question.`
   );
 
-  const model = new ChatOpenAI({
-    model: "gpt-4o",
+  const model = new ChatMistralAI({
+    model: "mistral-small-latest",
     temperature: 0,
   }).bindTools([tool], {
-    tool_choice: tool.name,
+    tool_choice: { type: "function", function: { name: tool.name } },
   });
 
   const chain = prompt.pipe(model);
@@ -156,7 +134,7 @@ async function gradeDocuments(state: typeof GraphState.State): Promise<Partial<t
   });
 
   return {
-    messages: [score]
+    messages: [score],
   };
 }
 
@@ -172,7 +150,9 @@ function checkRelevance(state: typeof GraphState.State): string {
   const { messages } = state;
   const lastMessage = messages[messages.length - 1];
   if (!("tool_calls" in lastMessage)) {
-    throw new Error("The 'checkRelevance' node requires the most recent message to contain tool calls.")
+    throw new Error(
+      "The 'checkRelevance' node requires the most recent message to contain tool calls."
+    );
   }
   const toolCalls = (lastMessage as AIMessage).tool_calls;
   if (!toolCalls || !toolCalls.length) {
@@ -196,7 +176,9 @@ function checkRelevance(state: typeof GraphState.State): string {
  * @param {typeof GraphState.State} state - The current state of the agent, including all messages.
  * @returns {Promise<Partial<typeof GraphState.State>>} - The updated state with the new message added to the list of messages.
  */
-async function agent(state: typeof GraphState.State): Promise<Partial<typeof GraphState.State>> {
+async function agent(
+  state: typeof GraphState.State
+): Promise<Partial<typeof GraphState.State>> {
   console.log("---CALL AGENT---");
 
   const { messages } = state;
@@ -204,14 +186,18 @@ async function agent(state: typeof GraphState.State): Promise<Partial<typeof Gra
   // and remove it if it exists. This is because the agent does not need to know
   // the relevance score.
   const filteredMessages = messages.filter((message) => {
-    if ("tool_calls" in message && Array.isArray(message.tool_calls) && message.tool_calls.length > 0) {
+    if (
+      "tool_calls" in message &&
+      Array.isArray(message.tool_calls) &&
+      message.tool_calls.length > 0
+    ) {
       return message.tool_calls[0].name !== "give_relevance_score";
     }
     return true;
   });
 
-  const model = new ChatOpenAI({
-    model: "gpt-4o",
+  const model = new ChatMistralAI({
+    model: "mistral-small-latest",
     temperature: 0,
     streaming: true,
   }).bindTools(tools);
@@ -227,7 +213,9 @@ async function agent(state: typeof GraphState.State): Promise<Partial<typeof Gra
  * @param {typeof GraphState.State} state - The current state of the agent, including all messages.
  * @returns {Promise<Partial<typeof GraphState.State>>} - The updated state with the new message added to the list of messages.
  */
-async function rewrite(state: typeof GraphState.State): Promise<Partial<typeof GraphState.State>> {
+async function rewrite(
+  state: typeof GraphState.State
+): Promise<Partial<typeof GraphState.State>> {
   console.log("---TRANSFORM QUERY---");
 
   const { messages } = state;
@@ -238,12 +226,12 @@ Here is the initial question:
 \n ------- \n
 {question} 
 \n ------- \n
-Formulate an improved question:`,
+Formulate an improved question:`
   );
 
   // Grader
-  const model = new ChatOpenAI({
-    model: "gpt-4o",
+  const model = new ChatMistralAI({
+    model: "mistral-small-latest",
     temperature: 0,
     streaming: true,
   });
@@ -258,13 +246,18 @@ Formulate an improved question:`,
  * @param {typeof GraphState.State} state - The current state of the agent, including all messages.
  * @returns {Promise<Partial<typeof GraphState.State>>} - The updated state with the new message added to the list of messages.
  */
-async function generate(state: typeof GraphState.State): Promise<Partial<typeof GraphState.State>> {
+async function generate(
+  state: typeof GraphState.State
+): Promise<Partial<typeof GraphState.State>> {
   console.log("---GENERATE---");
 
   const { messages } = state;
   const question = messages[0].content as string;
   // Extract the most recent ToolMessage
-  const lastToolMessage = messages.slice().reverse().find((msg) => msg._getType() === "tool");
+  const lastToolMessage = messages
+    .slice()
+    .reverse()
+    .find((msg) => msg._getType() === "tool");
   if (!lastToolMessage) {
     throw new Error("No tool message found in the conversation history");
   }
@@ -273,8 +266,8 @@ async function generate(state: typeof GraphState.State): Promise<Partial<typeof 
 
   const prompt = await pull<ChatPromptTemplate>("rlm/rag-prompt");
 
-  const llm = new ChatOpenAI({
-    model: "gpt-4o",
+  const llm = new ChatMistralAI({
+    model: "mistral-small-latest",
     temperature: 0,
     streaming: true,
   });
@@ -290,11 +283,6 @@ async function generate(state: typeof GraphState.State): Promise<Partial<typeof 
     messages: [response],
   };
 }
-Graph¶
-Start with an agent, callModel
-Agent make a decision to call a function
-If so, then action to call tool (retriever)
-Then call agent with the tool output added to messages (state)
 
 import { StateGraph } from "@langchain/langgraph";
 
@@ -316,7 +304,7 @@ workflow.addEdge(START, "agent");
 workflow.addConditionalEdges(
   "agent",
   // Assess agent decision
-  shouldRetrieve,
+  shouldRetrieve
 );
 
 workflow.addEdge("retrieve", "gradeDocuments");
@@ -330,7 +318,7 @@ workflow.addConditionalEdges(
     // Call tool node
     yes: "generate",
     no: "rewrite", // placeholder
-  },
+  }
 );
 
 workflow.addEdge("generate", END);
@@ -338,3 +326,33 @@ workflow.addEdge("rewrite", "agent");
 
 // Compile
 const app = workflow.compile();
+
+import { HumanMessage } from "@langchain/core/messages";
+import { ChatMistralAI } from "@langchain/mistralai";
+
+const inputs = {
+  messages: [
+    new HumanMessage(
+      "What are the types of agent memory based on Lilian Weng's blog post?"
+    ),
+  ],
+};
+let finalState;
+for await (const output of await app.stream(inputs)) {
+  for (const [key, value] of Object.entries(output)) {
+    const lastMsg = output[key].messages[output[key].messages.length - 1];
+    console.log(`Output from node: '${key}'`);
+    console.dir(
+      {
+        type: lastMsg._getType(),
+        content: lastMsg.content,
+        tool_calls: lastMsg.tool_calls,
+      },
+      { depth: null }
+    );
+    console.log("---\n");
+    finalState = value;
+  }
+}
+
+console.log(JSON.stringify(finalState, null, 2));
