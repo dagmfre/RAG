@@ -33,11 +33,13 @@
     "openai": "^4.86.1",
     "pnpm": "^10.6.1",
     "puppeteer": "^24.3.0",
+    "r2r-js": "^0.4.34",
     "sass": "^1.85.1",
     "ts-node": "^10.9.2",
     "typescript": "^5.7.3",
     "uuid": "^11.1.0",
-    "zod": "^3.24.2"
+    "zod": "^3.24.2",
+    "zod-to-json-schema": "^3.24.3"
   },
   "devDependencies": {
     "tsx": "^4.19.3"
